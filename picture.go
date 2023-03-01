@@ -51,8 +51,8 @@ func parseGraphicOptions(opts *GraphicOptions) *GraphicOptions {
 
 // AddPicture provides the method to add picture in a sheet by given picture
 // format set (such as offset, scale, aspect ratio setting and print settings)
-// and file path, supported image types: BMP, EMF, EMZ, GIF, JPEG, JPG, PNG,
-// SVG, TIF, TIFF, WMF, and WMZ. This function is concurrency safe. For example:
+// and file path, supported image types: EMF, EMZ, GIF, JPEG, JPG, PNG, SVG,
+// TIF, TIFF, WMF, and WMZ. This function is concurrency safe. For example:
 //
 //	package main
 //
@@ -110,14 +110,14 @@ func parseGraphicOptions(opts *GraphicOptions) *GraphicOptions {
 //	    }
 //	}
 //
-// The optional parameter "AutoFit" specifies if you make image size auto-fits the
+// The optional parameter "Autofit" specifies if you make image size auto-fits the
 // cell, the default value of that is 'false'.
 //
 // The optional parameter "Hyperlink" specifies the hyperlink of the image.
 //
 // The optional parameter "HyperlinkType" defines two types of
 // hyperlink "External" for website or "Location" for moving to one of the
-// cells in this workbook. When the "HyperlinkType" is "Location",
+// cells in this workbook. When the "hyperlink_type" is "Location",
 // coordinates need to start with "#".
 //
 // The optional parameter "Positioning" defines two types of the position of an
@@ -436,9 +436,8 @@ func (f *File) addMedia(file []byte, ext string) string {
 // type for relationship parts and the Main Document part.
 func (f *File) setContentTypePartImageExtensions() error {
 	imageTypes := map[string]string{
-		"bmp": "image/", "jpeg": "image/", "png": "image/", "gif": "image/",
-		"svg": "image/", "tiff": "image/", "emf": "image/x-", "wmf": "image/x-",
-		"emz": "image/x-", "wmz": "image/x-",
+		"jpeg": "image/", "png": "image/", "gif": "image/", "svg": "image/", "tiff": "image/",
+		"emf": "image/x-", "wmf": "image/x-", "emz": "image/x-", "wmz": "image/x-",
 	}
 	content, err := f.contentTypesReader()
 	if err != nil {
@@ -770,5 +769,88 @@ func (f *File) drawingResize(sheet, cell string, width, height float64, opts *Gr
 	}
 	width, height = width-float64(opts.OffsetX), height-float64(opts.OffsetY)
 	w, h = int(width*opts.ScaleX), int(height*opts.ScaleY)
+	return
+}
+
+type Picture struct {
+	Ret string
+	Buf []byte
+}
+
+func (f *File) GetPictures(sheet, cell string) ([]Picture, error) {
+	col, row, err := CellNameToCoordinates(cell)
+	if err != nil {
+		return nil, err
+	}
+	col--
+	row--
+	ws, err := f.workSheetReader(sheet)
+	if err != nil {
+		return nil, err
+	}
+	if ws.Drawing == nil {
+		return nil, err
+	}
+	target := f.getSheetRelationshipsTargetByID(sheet, ws.Drawing.RID)
+	drawingXML := strings.ReplaceAll(target, "..", "xl")
+	drawingRelationships := strings.ReplaceAll(
+		strings.ReplaceAll(target, "../drawings", "xl/drawings/_rels"), ".xml", ".xml.rels")
+
+	return f.getPictures(row, col, drawingXML, drawingRelationships)
+}
+
+func (f *File) getPictures(row, col int, drawingXML, drawingRelationships string) (pictures []Picture, err error) {
+	var (
+		wsDr            *xlsxWsDr
+		ok              bool
+		deWsDr          *decodeWsDr
+		drawRel         *xlsxRelationship
+		deTwoCellAnchor *decodeTwoCellAnchor
+
+		ret string
+		buf []byte
+	)
+
+	if wsDr, _, err = f.drawingParser(drawingXML); err != nil {
+		return
+	}
+	if ret, buf = f.getPictureFromWsDr(row, col, drawingRelationships, wsDr); len(buf) > 0 {
+		pictures = append(pictures, Picture{
+			Ret: ret,
+			Buf: buf,
+		})
+		return
+	}
+	deWsDr = new(decodeWsDr)
+	if err = f.xmlNewDecoder(bytes.NewReader(namespaceStrictToTransitional(f.readXML(drawingXML)))).
+		Decode(deWsDr); err != nil && err != io.EOF {
+		return
+	}
+	err = nil
+	for _, anchor := range deWsDr.TwoCellAnchor {
+		deTwoCellAnchor = new(decodeTwoCellAnchor)
+		if err = f.xmlNewDecoder(strings.NewReader("<decodeTwoCellAnchor>" + anchor.Content + "</decodeTwoCellAnchor>")).
+			Decode(deTwoCellAnchor); err != nil && err != io.EOF {
+			return
+		}
+		if err = nil; deTwoCellAnchor.From != nil && deTwoCellAnchor.Pic != nil {
+			if deTwoCellAnchor.From.Col == col && deTwoCellAnchor.From.Row == row {
+				drawRel = f.getDrawingRelationships(drawingRelationships, deTwoCellAnchor.Pic.BlipFill.Blip.Embed)
+				if _, ok = supportedImageTypes[filepath.Ext(drawRel.Target)]; ok {
+					ret = ""
+					buf = []byte{}
+
+					ret = filepath.Base(drawRel.Target)
+					if buffer, _ := f.Pkg.Load(strings.ReplaceAll(drawRel.Target, "..", "xl")); buffer != nil {
+						buf = buffer.([]byte)
+					}
+					pictures = append(pictures, Picture{
+						Ret: ret,
+						Buf: buf,
+					})
+				}
+			}
+		}
+	}
 	return
 }
